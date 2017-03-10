@@ -13,19 +13,27 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from functools import partial
 from functools import total_ordering
-import os
+import fcntl
 import logging
+import os
 import urllib2
 import yaml
 
 from lib import config
 from lib import exception
+from lib import package_source
 from lib import repository
 from lib import utils
+from lib.constants import REPOSITORIES_DIR
 
 CONF = config.get_config().CONF
 LOG = logging.getLogger(__name__)
+
+BUILD_CACHE_DIR = os.path.join(CONF.get('common').get('work_dir'), "cache")
+PACKAGES_REPOS_TARGET_PATH = os.path.join(CONF.get('common').get('work_dir'),
+                                          REPOSITORIES_DIR)
 
 
 @total_ordering
@@ -47,26 +55,42 @@ class Package(object):
             cls.__created_packages[package_name] = package
         return package
 
-    def __init__(self, name):
+    def __init__(self, name, force_rebuild=True):
+        """
+        Create a new package instance.
+
+        Args:
+            name: package name
+            force_rebuild: whether to force the rebuild of the package
+                in case its build results are already up-to-date
+        """
         self.name = name
         self.clone_url = None
         self.download_source = None
-        self.dependencies = []
+        self.install_dependencies = []
         self.build_dependencies = []
-        self.result_packages = []
+        self.build_cache_dir = os.path.join(BUILD_CACHE_DIR, self.name)
+        self.sources = []
         self.repository = None
         self.build_files = None
         self.download_build_files = []
+        utils.create_directory(PACKAGES_REPOS_TARGET_PATH)
+        self.lock_file_path = os.path.join(
+            PACKAGES_REPOS_TARGET_PATH, self.name + ".lock")
+        self.force_rebuild = force_rebuild
 
         # Dependencies packages may be present in those directories in older
-        # build versions. This keeps compatibility.
+        # versions of package metadata. This keeps compatibility.
         OLD_DEPENDENCIES_DIRS = ["build_dependencies", "dependencies"]
         PACKAGES_DIRS = [""] + OLD_DEPENDENCIES_DIRS
-        build_versions_repo_dir = CONF.get('default').get(
-            'build_versions_repo_dir')
+        versions_repo_url = CONF.get('common').get('packages_metadata_repo_url')
+        versions_repo_name = os.path.basename(os.path.splitext(versions_repo_url)[0])
+        versions_repo_target_path = os.path.join(
+            PACKAGES_REPOS_TARGET_PATH,
+            versions_repo_name)
         for rel_packages_dir in PACKAGES_DIRS:
             packages_dir = os.path.join(
-                build_versions_repo_dir, rel_packages_dir)
+                versions_repo_target_path, rel_packages_dir)
             package_dir = os.path.join(packages_dir, self.name)
             package_file = os.path.join(package_dir, self.name + ".yaml")
             if os.path.isfile(package_file):
@@ -94,22 +118,25 @@ class Package(object):
         Download package source code and build files.
         Optionally, do the same for its dependencies, recursively.
         """
+        # Download all package sources
+        download_f = partial(package_source.download, directory=PACKAGES_REPOS_TARGET_PATH, local_copy_subdir_name=self.name)
+        self.sources = map(download_f, self.sources)
+
+        # This is kept for backwards compatibility with older
+        # 'versions' repositories.
         if self.clone_url:
             self._download_source_code()
-            # Else let it download later during build with a custom
-            # command.
-            # TODO Remove this "if" and do not allow custom commands
+
         self._download_build_files()
         if recurse:
-            for dep in (self.dependencies + self.build_dependencies):
+            for dep in (self.install_dependencies + self.build_dependencies):
                 dep.download_files()
 
     def _download_source_code(self):
         LOG.info("%s: Downloading source code from '%s'." %
                  (self.name, self.clone_url))
-        self._setup_repository(
-            dest=CONF.get('default').get('repositories_path'),
-            branch=CONF.get('default').get('branch'))
+        self._setup_repository(dest=PACKAGES_REPOS_TARGET_PATH)
+
 
     def _load(self):
         """
@@ -122,36 +149,46 @@ class Package(object):
             raise exception.PackageDescriptorError(
                 "Failed to open %s's YAML descriptor" % self.name)
 
-        self.name = self.package_data.get('name')
-        self.clone_url = self.package_data.get('clone_url', None)
-        self.download_source = self.package_data.get('download_source', None)
+        self.name = os.path.splitext(os.path.basename(self.package_file))[0]
+        self.sources = self.package_data.get('sources', [])
+        for source in self.sources:
+            if 'archive' not in source.values()[0]:
+                source_name = source.keys()[0]
+                source[source_name]['archive'] = self.name
 
-        # Most packages keep their version in a VERSION file
-        # or in the .spec file. For those that don't, we need
-        # a custom file and regex.
         version = self.package_data.get('version', {})
         self.version_file_regex = (version.get('file'),
                                    version.get('regex'))
 
-        # NOTE(maurosr): Unfortunately some of the packages we build
-        # depend on a gziped file which changes according to the build
-        # version so we need to get that name somehow, grep the
-        # specfile would be uglier imho.
-        self.expects_source = self.package_data.get('expects_source')
-
-        # NOTE(maurosr): branch and commit id are special cases for the
-        # future, we plan to use tags on every project for every build
-        # globally set in config.yaml, then this would allow some user
-        # customization to set their preferred commit id/branch or even
-        # a custom git tree.
+        # These are all being kept for compatibility reasons. They are
+        # required in order to build old 'versions' repositories.
+        #
+        # This should be removed when backwards compatibility is no longer a
+        # requirement. {{{
+        self.clone_url = self.package_data.get('clone_url', None)
+        self.download_source = self.package_data.get('download_source', None)
+        self.expects_source = self.package_data.get('expects_source', self.name)
         self.branch = self.package_data.get('branch', None)
         self.commit_id = self.package_data.get('commit_id', None)
+        # }}}
 
         LOG.info("%s: Loaded package metadata successfully" % self.name)
 
+        # Check if this package has shared resources that need to be
+        # locked from other processes
+        self.locking_enabled = False
+        # The URL source type is not downloaded to a shared location
+        for source in self.sources:
+            if "url" not in source:
+                self.locking_enabled = True
+                break
+        if not self.sources:
+            # Old sources format is used, it's better to enable locking
+            self.locking_enabled = True
+
     def _setup_repository(self, dest=None, branch=None):
         self.repository = repository.get_git_repository(
-            self.name, self.clone_url, dest)
+            self.clone_url, dest)
         self.repository.checkout(self.commit_id or self.branch or branch)
 
     def _download_source(self, build_dir):
@@ -159,6 +196,9 @@ class Package(object):
         An alternative to just execute a given command to obtain sources.
         """
         utils.run_command(self.download_source, cwd=build_dir)
+        # automatically append tar.gz if expects_source has no extension
+        if self.expects_source == self.name:
+            self.expects_source = "%s.tar.gz" % self.name
         return os.path.join(build_dir, self.expects_source)
 
     def _download_build_files(self):
@@ -168,3 +208,102 @@ class Package(object):
             filename = os.path.join(self.build_files, url.split('/')[-1])
             with open(filename, "wb") as file_data:
                 file_data.write(data)
+
+    def lock(self):
+        """
+        Locks the package to avoid concurrent operations on its shared
+        resources.
+        Currently, the only resource shared among scripts executed from
+        different directories is the repository.
+        """
+        if not self.locking_enabled:
+            LOG.debug("This package has no shared resources to lock")
+            return
+
+        LOG.debug("Checking for lock on file {}.".format(self.lock_file_path))
+        self.lock_file = open(self.lock_file_path, "w")
+        try:
+            fcntl.lockf(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError as exc:
+            RESOURCE_UNAVAILABLE_ERROR = 11
+            if exc.errno == RESOURCE_UNAVAILABLE_ERROR:
+                LOG.info("Waiting for other process to finish operations "
+                         "on {}.".format(self.name))
+            else:
+                raise
+        fcntl.lockf(self.lock_file, fcntl.LOCK_EX)
+
+    def unlock(self):
+        """
+        Unlocks the package to allow other processes to operate on its
+        shared resources.
+        """
+        if not self.locking_enabled:
+            return
+
+        LOG.debug("Unlocking file {}".format(self.lock_file_path))
+        fcntl.lockf(self.lock_file, fcntl.LOCK_UN)
+        self.lock_file.close()
+
+    @property
+    def cached_build_results(self):
+        """
+        Get the files cached from the last build of this package.
+
+        Returns:
+            [str]: paths to the resulting files of the last build
+        """
+        return list()
+
+    @property
+    def _latest_build_results_time_stamp(self):
+        """
+        Get time stamp of the latest build result file.
+
+        Returns:
+            int: time stamp of the latest build result file.
+        """
+        latest_build_results_time_stamp = None
+        for file_path in self.cached_build_results:
+            file_time_stamp = os.stat(file_path).st_mtime
+            latest_build_results_time_stamp = max(
+                latest_build_results_time_stamp, file_time_stamp)
+        return latest_build_results_time_stamp
+
+    def needs_rebuild(self):
+        """
+        Check if the package needs to be rebuild.
+        Compare the modification time of the package source and metadata
+        files with the latest build results files and check if the build
+        dependencies were updated.
+
+        Returns:
+            bool: whether the package needs to be rebuilt
+        """
+        # Check if there are any cached build results
+        if not self.cached_build_results:
+            LOG.debug("%s: No previous build results found." % self.name)
+            return True
+
+        latest_source_time_stamp = None
+        for file_path in utils.recursive_glob(self.package_dir, "*"):
+            file_time_stamp = os.stat(file_path).st_mtime
+            latest_source_time_stamp = max(
+                latest_source_time_stamp, file_time_stamp)
+        latest_build_results_time_stamp = self._latest_build_results_time_stamp
+
+        # Check if sources are older than build results
+        if latest_build_results_time_stamp < latest_source_time_stamp:
+            LOG.debug("%s: Build results are outdated." % self.name)
+            return True
+
+        # Check if build dependencies were rebuilt since last build
+        for dependency in self.build_dependencies:
+            if (latest_build_results_time_stamp
+                    < dependency._latest_build_results_time_stamp):
+                LOG.debug("%s: Build dependency %s has been rebuilt."
+                          % (self.name, dependency.name))
+                return True
+
+        LOG.debug("%s: Up-to-date build results found." % self.name)
+        return False

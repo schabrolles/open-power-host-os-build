@@ -15,6 +15,7 @@
 
 import logging
 import os
+import urlparse
 import utils
 
 import git
@@ -22,7 +23,6 @@ import gitdb
 
 from lib import config
 from lib import exception
-
 
 LOG = logging.getLogger(__name__)
 
@@ -35,20 +35,49 @@ class PushError(Exception):
         super(PushError, self).__init__(message)
 
 
-def get_git_repository(name, remote_repo_url, parent_dir_path):
+def get_git_repository(remote_repo_url, parent_dir_path):
     """
     Get a local git repository located in a subdirectory of the parent
-    dir, according to specified name.
-    If it does not exist, clone it from the specified URL.
+    directory, named after the file name of the URL path (git default),
+    updating the main remote URL, if needed.
+    If the local repository does not exist, clone it from the remote
+    URL.
     """
+    # infer git repository name from its URL
+    url_parts = urlparse.urlparse(remote_repo_url)
+    name = os.path.basename(os.path.splitext(url_parts.path)[0])
+
     repo_path = os.path.join(parent_dir_path, name)
     if os.path.exists(repo_path):
-        return GitRepository(repo_path)
+        MAIN_REMOTE_NAME = "origin"
+        repo = GitRepository(repo_path)
+        previous_url = repo.remotes[MAIN_REMOTE_NAME].url
+        if previous_url != remote_repo_url:
+            LOG.debug("Updating {name}'s repository URL from '{previous_url}' "
+                      "to '{new_url}'"
+                      .format(name=name, previous_url=previous_url,
+                              new_url=remote_repo_url))
+            repo.delete_remote(MAIN_REMOTE_NAME)
+            repo.create_remote(MAIN_REMOTE_NAME, remote_repo_url)
+        return repo
     else:
         CONF = config.get_config().CONF
-        return GitRepository.clone_from(remote_repo_url,
-                                        repo_path,
-                                        proxy=CONF.get('http_proxy'))
+        return GitRepository.clone_from(
+            remote_repo_url, repo_path,
+            proxy=CONF.get('common').get('http_proxy'))
+
+
+def get_svn_repository(remote_repo_url, repo_path):
+    """
+    Get a local subversion repository located in a directory.
+    If it does not exist, check it out from the specified URL.
+    """
+    if os.path.exists(repo_path):
+        return SvnRepository(remote_repo_url, repo_path)
+    else:
+        # TODO: setup HTTP proxy by editing ~/.subversion/servers
+        return SvnRepository.checkout_from(remote_repo_url,
+                                           repo_path)
 
 
 class GitRepository(git.Repo):
@@ -173,3 +202,119 @@ class GitRepository(git.Repo):
         cmd = "gzip %s" % archive_file
         utils.run_command(cmd)
         return archive_file + ".gz"
+
+    def commit_changes(self, commit_message, committer_name, committer_email):
+        """
+        Commit all changes made to the repository.
+
+        Args:
+            commit_message (str): message describing the commit
+            committer_name (str): committer name
+            committer_email (str): committer email
+        """
+        LOG.info("Adding files to repository index")
+        self.index.add(["*"])
+
+        LOG.info("Committing changes to local repository")
+        actor = git.Actor(committer_name, committer_email)
+        self.index.commit(commit_message, author=actor, committer=actor)
+
+    def push_head_commits(self, remote_repo_url, remote_repo_branch):
+        """
+        Push commits from local Git repository head to the remote Git
+        repository, using the system's configured SSH credentials.
+
+        Args:
+            remote_repo_url (str): remote git repository URL
+            remote_repo_branch (str): remote git repository branch
+
+        Raises:
+            repository.PushError: if push fails
+        """
+        REPO_REMOTE_NAME = "push-remote"
+        LOG.info("Creating remote named '{name}' for URL '{url}'"
+                 .format(name=REPO_REMOTE_NAME, url=remote_repo_url))
+        self.create_remote(REPO_REMOTE_NAME, remote_repo_url)
+
+        LOG.info("Pushing changes to remote repository branch '{}'"
+                 .format(remote_repo_branch))
+        remote = self.remote(REPO_REMOTE_NAME)
+        refspec = "HEAD:refs/heads/{}".format(remote_repo_branch)
+        push_info = remote.push(refspec=refspec)[0]
+        LOG.debug("Push result: {}".format(push_info.summary))
+        if git.PushInfo.ERROR & push_info.flags:
+            raise PushError(push_info)
+
+
+class SvnRepository():
+
+    @classmethod
+    def checkout_from(cls, remote_repo_url, repo_path):
+        """
+        Checkout a repository from a remote URL into a local path.
+        """
+        LOG.info("Checking out repository from '%s' into '%s'" %
+                 (remote_repo_url, repo_path))
+
+        command = 'svn checkout '
+
+        CONF = config.get_config().CONF
+        proxy = CONF.get('common').get('http_proxy')
+
+        if proxy:
+            url = urlparse.urlparse(proxy)
+            host = url.scheme + '://' + url.hostname
+            port = url.port
+            options = ("servers:global:http-proxy-host='%s'" % host,
+                       "servers:global:http-proxy-port='%s'" % port)
+
+            proxy_conf = ['--config-option ' + option for option in options]
+
+            command += ' '.join(proxy_conf) + ' '
+
+        command += '%(remote_repo_url)s %(local_target_path)s' % \
+                   {'remote_repo_url': remote_repo_url,
+                    'local_target_path': repo_path}
+        try:
+            utils.run_command(command)
+            return SvnRepository(remote_repo_url, repo_path)
+        except:
+            message = "Failed to clone repository"
+            LOG.exception(message)
+            raise exception.RepositoryError(message=message)
+
+    def __init__(self, remote_repo_url, local_repo_path):
+        self.url = remote_repo_url
+        self.working_copy_dir = local_repo_path
+        LOG.info("Found existent repository at destination path %s" % local_repo_path)
+
+    @property
+    def name(self):
+        return os.path.basename(self.working_copy_dir)
+
+    def checkout(self, revision):
+        """
+        Check out a revision.
+        """
+        LOG.info("%(name)s: Updating svn repository"
+                 % dict(name=self.name))
+        try:
+            utils.run_command("svn update", cwd=self.working_copy_dir)
+        except:
+            LOG.debug("%(name)s: Failed to update svn repository"
+                      % dict(name=self.name))
+            pass
+        else:
+            LOG.info("%(name)s: Updated svn repository" % dict(name=self.name))
+
+        LOG.info("%(name)s: Checking out revision %(revision)s"
+                 % dict(name=self.name, revision=revision))
+        try:
+            utils.run_command("svn checkout %(repo_url)s@%(revision)s ." %
+                dict(repo_url=self.url, revision=revision),
+                cwd=self.working_copy_dir)
+        except:
+            message = ("Could not find revision %s at %s repository"
+                       % (revision, self.name))
+            LOG.exception(message)
+            raise exception.RepositoryError(message=message)

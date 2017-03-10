@@ -12,6 +12,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+from functools import partial
+
 
 import datetime
 import logging
@@ -19,24 +21,31 @@ import os
 import shutil
 
 from lib import config
-from lib import build_system
 from lib import exception
+from lib import package_builder
+from lib import package_source
 from lib import utils
+from lib.constants import LATEST_DIR
 
 CONF = config.get_config().CONF
 LOG = logging.getLogger(__name__)
 MOCK_CHROOT_BUILD_DIR = "/builddir/build/SOURCES"
-MOCK_BIN = "/usr/bin/mock"
 
 
-class Mock(build_system.PackageBuilder):
-    def __init__(self, config):
+class Mock(package_builder.PackageBuilder):
+    def __init__(self, config_file):
         super(Mock, self).__init__()
-        self.mock_config = config
-        self.mock_args = CONF.get('default').get('mock_args')
-        self.result_dir = CONF.get('default').get('result_dir')
+        binary_file = CONF.get('common').get('mock_binary')
+        extra_args = CONF.get('build_packages').get('mock_args') or ""
         self.build_dir = None
+        self.build_results_dir = CONF.get('build_packages').get('result_dir')
         self.archive = None
+        self.timestamp = datetime.datetime.now().isoformat()
+        self.common_mock_args = (
+            "%(binary_file)s -r %(config_file)s %(extra_args)s "
+            "--uniqueext %(suffix)s" % dict(
+                binary_file=binary_file, config_file=config_file,
+                extra_args=extra_args, suffix=self.timestamp))
 
     def initialize(self):
         """
@@ -44,18 +53,16 @@ class Mock(build_system.PackageBuilder):
         packages. This setup is common for all packages that are built
         and needs to be done only once.
         """
-        cmd = "%s --init -r %s %s " % (MOCK_BIN, self.mock_config,
-                                       self.mock_args)
+        cmd = self.common_mock_args + " --init"
         utils.run_command(cmd)
 
     def build(self, package):
+        self.clean_cache_dir(package)
         LOG.info("%s: Starting build process" % package.name)
-        self._prepare(package)
         self._build_srpm(package)
         self._install_external_dependencies(package)
-        cmd = "%s -r %s %s --rebuild %s --no-clean --resultdir=%s" % (
-            MOCK_BIN, self.mock_config, self.mock_args,
-            self.build_dir + "/*.rpm", self.build_dir)
+        cmd = (self.common_mock_args + " --rebuild %s --no-clean --resultdir=%s"
+               % (self.build_dir + "/*.rpm", self.build_dir))
 
         if package.rpmmacro:
             cmd = cmd + " --macro-file=%s" % package.rpmmacro
@@ -72,25 +79,20 @@ class Mock(build_system.PackageBuilder):
             raise
 
         msg = "%s: Success! RPMs built!" % (package.name)
-        self._save_rpm(package)
+        self._copy_rpms(self.build_dir, package.build_cache_dir)
         LOG.info(msg)
-        LOG.info(msg)
-        if (CONF.get('keep_builddir', None) or not CONF.get('keep_builddir')):
+        if not CONF.get('build_packages').get('keep_build_dir'):
             self._destroy_build_directory()
 
     def _build_srpm(self, package):
         LOG.info("%s: Building SRPM" % package.name)
-        cmd = ("%s -r %s %s --buildsrpm --no-clean --spec %s --source %s "
-               "--resultdir=%s" % (MOCK_BIN,
-                                   self.mock_config,
-                                   self.mock_args,
-                                   package.spec_file.path,
-                                   self.archive,
-                                   self.build_dir))
-
+        cmd = (self.common_mock_args +
+               " --buildsrpm --no-clean --spec %s --sources %s --resultdir=%s"
+               % (package.spec_file.path, self.archive, self.build_dir))
         utils.run_command(cmd)
 
-    def _prepare(self, package):
+    def prepare_sources(self, package):
+        LOG.info("%s: Preparing source files." % package.name)
         self._create_build_directory(package)
         self._prepare_archive(package)
         if package.build_files:
@@ -98,35 +100,52 @@ class Mock(build_system.PackageBuilder):
 
     def _prepare_archive(self, package):
         LOG.info("%s: Preparing archive." % package.name)
-        if package.repository:
-            self.archive = package.repository.archive(package.expects_source,
-                                                      package.commit_id,
-                                                      self.build_dir)
+
+        if package.sources:
+            archive_to_build_dir = partial(package_source.archive,
+                                           directory=self.build_dir)
+            archived_sources = map(archive_to_build_dir, package.sources)
+            package.sources = archived_sources
+            self.archive = self.build_dir
+        elif package.repository:
+            file_path = package.repository.archive(package.expects_source,
+                                                   package.commit_id,
+                                                   self.build_dir)
+            self.archive = os.path.dirname(file_path)
+        elif package.download_source:
+            file_path = package._download_source(self.build_dir)
+            self.archive = os.path.dirname(file_path)
         else:
-            self.archive = package._download_source(self.build_dir)
+            LOG.warning("%s: Package has no external sources.", package.name)
+            self.archive = self.build_dir
 
     def _copy_files_to_chroot(self, package):
-        cmd = "%s -r %s %s " % (MOCK_BIN, self.mock_config, self.mock_args)
-
-        files = []
         for f in os.listdir(package.build_files):
-            files.append(os.path.join(package.build_files, f))
-        cmd = cmd + " --copyin %s %s" % (" ".join(files),
-                                         MOCK_CHROOT_BUILD_DIR)
-
-        utils.run_command(cmd)
+            file_path = os.path.join(package.build_files, f)
+            LOG.info("copying %s to %s" % (file_path, self.archive))
+            shutil.copy(file_path, self.archive)
 
     def clean(self):
-        utils.run_command("%s --clean" % MOCK_BIN)
+        utils.run_command(self.common_mock_args + " --clean")
+
+    def clean_cache_dir(self, package):
+        """
+        Delete the package's cached results directory.
+
+        Args:
+            package: package whose cached results will be removed
+        """
+        if os.path.isdir(package.build_cache_dir):
+            LOG.debug("%s: Cleaning previously cached build results."
+                      % package.name)
+            shutil.rmtree(package.build_cache_dir)
 
     def _install_external_dependencies(self, package):
-        cmd = "%s -r %s %s " % (MOCK_BIN, self.mock_config, self.mock_args)
-        if package.build_dependencies or package.dependencies:
+        if package.build_dependencies:
+            cmd = self.common_mock_args
             install = " --install"
             for dep in package.build_dependencies:
-                install = " ".join([install, " ".join(dep.result_packages)])
-            for dep in package.dependencies:
-                install = " ".join([install, " ".join(dep.result_packages)])
+                install = " ".join([install, " ".join(dep.cached_build_results)])
 
             cmd = cmd + install
             LOG.info("%s: Installing dependencies on chroot" % package.name)
@@ -134,27 +153,54 @@ class Mock(build_system.PackageBuilder):
 
     def _create_build_directory(self, package):
         self.build_dir = os.path.join(
-            os.getcwd(), 'build',
-            datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S'))
+            os.path.abspath(CONF.get('common').get('work_dir')), 'mock_build',
+            self.timestamp, package.name)
         os.makedirs(self.build_dir)
         os.chmod(self.build_dir, 0777)
 
     def _destroy_build_directory(self):
         shutil.rmtree(self.build_dir)
 
-    def _save_rpm(self, package):
-        if not os.path.exists(self.result_dir):
-            LOG.info("Creating directory to store RPM at %s " %
-                     self.result_dir)
-            os.makedirs(self.result_dir)
-            os.chmod(self.result_dir, 0777)
+    def _copy_rpms(self, source_dir, target_dir):
+        """
+        Copy the RPMs created by building a package to a target directory.
 
-        LOG.info("%s: Saving RPMs at %s" % (package.name, self.result_dir))
-        for f in os.listdir(self.build_dir):
-            if f.endswith(".rpm") and not f.endswith(".src.rpm"):
-                LOG.info("Saving %s at result directory %s" % (f,
-                         self.result_dir))
-                orig = os.path.join(self.build_dir, f)
-                dest = os.path.join(self.result_dir, f)
-                shutil.move(orig, dest)
-                package.result_packages.append(dest)
+        Args:
+            source_dir(str): path to the source directory containing the
+                RPMs
+            target_dir(str): path to the target directory
+        """
+        if not os.path.exists(target_dir):
+            LOG.debug("Creating directory to store RPMs at %s " % target_dir)
+            os.makedirs(target_dir)
+
+        LOG.info("Copying RPMs from %s to %s" % (source_dir, target_dir))
+        for source_file_name in os.listdir(source_dir):
+            if (source_file_name.endswith(".rpm")
+                    and not source_file_name.endswith(".src.rpm")):
+                LOG.info("Copying RPM file: %s" % source_file_name)
+                source_file_path = os.path.join(source_dir, source_file_name)
+                target_file_path = os.path.join(target_dir, source_file_name)
+                shutil.copy(source_file_path, target_file_path)
+
+    def copy_results(self, package):
+        """
+        Copy cached build results to the results directory.
+
+        Args:
+            package(Package): package whose result files will be copied
+        """
+        package_build_results_dir = os.path.join(
+            CONF.get('common').get('result_dir'), 'packages',
+            self.timestamp, package.name)
+        self._copy_rpms(package.build_cache_dir, package_build_results_dir)
+
+    def create_latest_symlink_result_dir(self):
+        """
+        Create latest symlink pointing to the current result directory.
+        """
+        latest_package_build_results_dir = os.path.join(
+            CONF.get('common').get('result_dir'), 'packages',
+            LATEST_DIR)
+        utils.force_symlink(self.timestamp,
+                            latest_package_build_results_dir)

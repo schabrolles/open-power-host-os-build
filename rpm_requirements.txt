@@ -1,0 +1,10 @@
+GitPython
+PyYAML
+git
+lzop
+mock
+nosync
+python-lxml
+rpm-build
+rpmdevtools
+subversion

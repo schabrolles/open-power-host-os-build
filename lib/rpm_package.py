@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import glob
 import os
 import logging
 import re
@@ -71,9 +72,12 @@ class SpecFile(object):
         Cached content not yet written to the file is not considered.
         """
         if tag not in self._cached_tags:
-            self._cached_tags[tag] = utils.run_command(
+            tag = utils.run_command(
                 "rpmspec --srpm -q --qf '%%{%s}' %s 2>/dev/null" % (
                     tag.upper(), self.path)).strip()
+            if tag == "(none)":
+                tag = None
+            self._cached_tags[tag] = tag
 
         return self._cached_tags[tag]
 
@@ -103,8 +107,8 @@ class SpecFile(object):
 
         self.write_content()
 
-    def bump_release(self, log, user_name, user_email):
-        comment = "\n".join(['- ' + l for l in log])
+    def bump_release(self, change_log_lines, user_name, user_email):
+        comment = "\n".join(['- ' + l for l in change_log_lines])
         user_string = "%(user_name)s <%(user_email)s>" % locals()
         cmd = "rpmdev-bumpspec -c '%s' -u '%s' %s" % (
             comment, user_string, self.path)
@@ -114,17 +118,58 @@ class SpecFile(object):
         self._content = None
 
     def update_prerelease_tag(self, new_prerelease):
-        self._replace_macro_definition('prerelease', new_prerelease)
-        self.write_content()
+        self.replace_macro_definition('prerelease', new_prerelease)
         LOG.info("Updated '%s' prerelease tag to: %s"
                  % (self.path, new_prerelease))
 
+    def update_commit_id(self, old_commit_id, new_commit_id):
+
+        # change log may contain old commit IDs and we do not want to replace them
+
+        # read up to change log
+        lines = []
+        CHANGE_LOG_TAG = "%changelog"
+        change_log_lines = []
+        started_change_log = False
+        with file(self.path, "r") as f:
+            for line in f:
+                if CHANGE_LOG_TAG in line:
+                    started_change_log = True
+                if not started_change_log:
+                    lines.append(line)
+                else:
+                    change_log_lines.append(line)
+
+        # replace commit ID up to change log
+        with file(self.path, "w") as f:
+            for line in lines:
+                line = line.replace(old_commit_id, new_commit_id)
+                f.write(line)
+            for line in change_log_lines:
+                f.write(line)
+
     def _replace_macro_definition(self, macro_name, replacement):
         """
-        Updates the file content cache, replacing the macro value.
+        Update the file content cache, replacing the macro value.
+
+        Args:
+            macro_name (str): macro name
+            replacement (str): macro's new definition
         """
+        LOG.debug("Defining macro '%s' with: %s" % (macro_name, replacement))
         self.content = re.sub(r'(%%define\s+%s\s+)\S+' % macro_name,
                               r'\g<1>' + replacement, self.content)
+
+    def replace_macro_definition(self, macro_name, replacement):
+        """
+        Update the spec file, replacing the macro value.
+
+        Args:
+            macro_name (str): macro name
+            replacement (str): macro's new definition
+        """
+        self._replace_macro_definition(macro_name, replacement)
+        self.write_content()
 
 
 class RPM_Package(Package):
@@ -139,31 +184,65 @@ class RPM_Package(Package):
         """
         super(RPM_Package, self)._load()
         try:
-            # load distro files
-            files = self.package_data.get('files').get(
-                self.distro.lsb_name).get(self.distro.version)
+            # keeps backwards compatibility with old yaml files which have 'centos'
+            # instead of 'CentOS'
+            if self.distro.lsb_name in self.package_data.get('files', {}):
+                distro_attrib_name = self.distro.lsb_name
+            else:
+                distro_attrib_name = self.distro.lsb_name.lower()
 
-            self.build_files = files.get('build_files', None)
-            if self.build_files:
-                self.build_files = os.path.join(
-                    self.package_dir, self.build_files)
+            # load distro files
+            files = self.package_data.get('files', {}).get(
+                distro_attrib_name, {}).get(self.distro.version, {}) or {}
+
+            default_build_files_dir_rel_path = os.path.join(
+                self.distro.lsb_name, self.distro.version, "SOURCES")
+            build_files_dir_rel_path = files.get('build_files') or default_build_files_dir_rel_path
+            build_files_dir_path = os.path.join(self.package_dir, build_files_dir_rel_path)
+            if os.path.isdir(build_files_dir_path):
+                self.build_files = build_files_dir_path
+            else:
+                self.build_files = None
             self.download_build_files = files.get('download_build_files', [])
 
             # list of dependencies
+            for dep_name in files.get('install_dependencies', []):
+                dep = RPM_Package.get_instance(
+                    dep_name, self.distro, force_rebuild=self.force_rebuild)
+                self.install_dependencies.append(dep)
+
+            # keeps backward compatibility with old yaml files which have 'dependencies'
+            # instead of 'install_dependencies'
             for dep_name in files.get('dependencies', []):
-                dep = RPM_Package.get_instance(dep_name, self.distro)
-                self.dependencies.append(dep)
+                dep = RPM_Package.get_instance(
+                    dep_name, self.distro, force_rebuild=self.force_rebuild)
+                self.install_dependencies.append(dep)
 
             for dep_name in files.get('build_dependencies', []):
-                dep = RPM_Package.get_instance(dep_name, self.distro)
+                dep = RPM_Package.get_instance(
+                    dep_name, self.distro, force_rebuild=self.force_rebuild)
                 self.build_dependencies.append(dep)
 
-            self.rpmmacro = files.get('rpmmacro', None)
-            if self.rpmmacro:
-                self.rpmmacro = os.path.join(self.package_dir, self.rpmmacro)
+            # keeps backward compatibility with old yaml files which have build
+            # dependencies listed as install dependencies
+            if self.distro.version == "7.2":
+                self.build_dependencies = list(set(
+                    self.build_dependencies + self.install_dependencies))
 
-            self.spec_file = SpecFile(
-                os.path.join(self.package_dir, files.get('spec')))
+            default_rpm_macros_file_rel_path = os.path.join(
+                self.distro.lsb_name, self.distro.version, "rpmmacro")
+            rpm_macros_file_rel_path = files.get('rpmmacro', default_rpm_macros_file_rel_path)
+            rpm_macros_file_path = os.path.join(self.package_dir, rpm_macros_file_rel_path)
+            if os.path.isfile(rpm_macros_file_path):
+                self.rpmmacro = rpm_macros_file_path
+            else:
+                self.rpmmacro = None
+
+            default_spec_file_rel_path = os.path.join(
+                self.distro.lsb_name, self.distro.version, "%s.spec" % self.name)
+            spec_file_rel_path = files.get('spec', default_spec_file_rel_path)
+            self.spec_file_path = os.path.join(self.package_dir, spec_file_rel_path)
+            self.spec_file = SpecFile(self.spec_file_path)
 
             if os.path.isfile(self.spec_file.path):
                 LOG.info("Package found: %s for %s %s" % (
@@ -175,6 +254,21 @@ class RPM_Package(Package):
                     distro_version=self.distro.version)
         except TypeError:
             raise exception.PackageDescriptorError(package=self.name)
+
+    @property
+    def cached_build_results(self):
+        """
+        Get the files cached from the last build of this package.
+
+        Returns:
+            [str]: paths to the resulting files of the last build
+        """
+        result_files_glob = os.path.join(self.build_cache_dir, "*.rpm")
+        return glob.glob(result_files_glob)
+
+    @property
+    def epoch(self):
+        return self.spec_file.query_tag("epoch")
 
     @property
     def version(self):

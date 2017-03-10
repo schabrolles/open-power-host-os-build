@@ -34,7 +34,6 @@ class LinuxDistribution(object):
         distro.
         """
         self.lsb_name = name
-        self.package_builder = None
         if arch_and_endianness.upper() not in SUPPORTED_ARCH_AND_ENDIANNESS:
             raise exception.DistributionVersionNotSupportedError(
                 msg="Endianness not supported: %s" % arch_and_endianness)
@@ -49,16 +48,3 @@ class LinuxDistribution(object):
                 distribution=name, version=version)
         LOG.info("Distribution detected: %(lsb_name)s %(version)s" %
                  vars(self))
-
-    def build_packages(self, packages):
-        """
-        This is were distro and builder interact and produce the packages we
-        want.
-        """
-        self.package_builder.initialize()
-        for package in packages:
-            self.package_builder.build(package)
-        self.clean(packages)
-
-    def clean(self, packages):
-        self.package_builder.clean()

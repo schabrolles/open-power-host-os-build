@@ -28,16 +28,17 @@ class Scheduler(object):
     This class basically returns a tuple containing the best order to build
     things.
     """
-    def __call__(self, packages):
-        self.packages = packages
-        LOG.info("Scheduling packages and their dependecies: %s" % packages)
-        ordered_packages = self._dfs(packages, [])
-        LOG.debug("Scheduled order: %s" % ordered_packages)
-        return tuple(ordered_packages)
 
     def _dfs(self, packages, visited):
         """
-        Return a list containing unique package names.
+        Perform a depth-first search to order packages by dependencies
+
+        Args:
+            packages ([Package]): all packages
+            visited ([Package]): visited packages
+
+        Returns:
+            [Package]: ordered list of packages
         """
         order = []
         try:
@@ -47,10 +48,30 @@ class Scheduler(object):
         else:
             if p not in visited:
                 visited.append(p)
-                if p.dependencies:
-                    order.extend(self._dfs(p.dependencies, visited))
+                # runtime dependencies do not need to be built before the package,
+                # they can be built anytime. We randomly chose to prioritize building
+                # installation dependencies before the package.
+                if p.install_dependencies:
+                    order.extend(self._dfs(p.install_dependencies, visited))
                 if p.build_dependencies:
                     order.extend(self._dfs(p.build_dependencies, visited))
                 order.append(p)
             order.extend(self._dfs(packages[1:], visited))
         return list(OrderedDict.fromkeys(order))
+
+    def schedule(self, packages):
+        """
+        Order packages by dependencies
+
+        Args:
+            packages ([Package]): packages
+
+        Returns:
+            (Package): ordered tuple of packages
+        """
+
+        self.packages = packages
+        LOG.info("Scheduling packages and their dependecies: %s" % packages)
+        ordered_packages = self._dfs(packages, [])
+        LOG.debug("Scheduled order: %s" % ordered_packages)
+        return tuple(ordered_packages)

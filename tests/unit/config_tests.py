@@ -11,41 +11,55 @@ import unittest
 class TestConfigParser(unittest.TestCase):
 
     @parameterized.expand([
-        ('--config-file=foo', 'config_file', 'foo'),
-        ('--packages=foo', 'packages', ['foo']),
-        ('--log-file=foo', 'log_file', 'foo'),
-        ('--verbose', 'verbose', True),
-        ('--result-dir=foo', 'result_dir', 'foo'),
-        ('--repositories-path=foo', 'repositories_path', 'foo'),
-        ('--keep-builddir', 'keep_builddir', True),
-        ('--build-versions-repository-url=foo', 'build_versions_repository_url', 'foo'),
-        ('--build-version=foo', 'build_version', 'foo'),
-        ('--mock-args=foo', 'mock_args', 'foo'),
+        (['--config-file=foo', 'build-packages'], 'config_file', 'foo'),
+        (['--verbose', 'build-packages'], 'verbose', True),
+        (['--work-dir=foo', 'build-packages'], 'work_dir', 'foo'),
+        (['build-packages', '--packages=foo'], 'packages', ['foo']),
+        (['build-packages', '--result-dir=foo'], 'result_dir', 'foo'),
+        (['build-packages', '--keep-build-dir'], 'keep_build_dir', True),
+        (['build-packages', '--packages-metadata-repo-url=foo'], 'packages_metadata_repo_url', 'foo'),
+        (['build-packages', '--packages-metadata-repo-branch=foo'], 'packages_metadata_repo_branch', 'foo'),
+        (['build-packages', '--mock-args=foo'], 'mock_args', 'foo'),
+        (['build-release-notes', '--push-repo-url=foo'], 'push_repo_url', 'foo'),
+        (['build-release-notes', '--push-repo-branch=foo'], 'push_repo_branch', 'foo'),
+        (['build-release-notes', '--updater-name=foo'], 'updater_name', 'foo'),
+        (['build-release-notes', '--updater-email=foo'], 'updater_email', 'foo'),
+        (['build-iso', '--packages-dir=foo'], 'packages_dir', 'foo'),
+        (['build-iso', '--mock-args=foo'], 'mock_args', 'foo'),
+        (['update-versions', '--no-commit-updates'], 'commit_updates', False),
+        (['update-versions', '--no-push-updates'], 'push_updates', False),
     ])
-    def test_parse_arguments_list_WithLongArgument_ShouldParseArgumentValue(self, argument, key, expected):
+    def test_parse_arguments_list_WithLongArgument_ShouldParseArgumentValue(self, arguments, key, expected):
         cfg = ConfigParser()
 
-        result_dict = cfg.parse_arguments_list([argument])
+        result_dict = cfg.parse_command_line_arguments(arguments)
         value = result_dict.get(key)
 
         eq_(value, expected)
 
     @parameterized.expand([
-        ('config_file', './config.yaml'),
-        ('packages', None),
-        ('log_file', '/var/log/host-os/builds.log'),
-        ('verbose', False),
-        ('result_dir', './result'),
-        ('repositories_path', '/var/lib/host-os/repositories'),
-        ('keep_builddir', False),
-        ('build_versions_repository_url', None),
-        ('build_version', None),
-        ('mock_args', ''),
+        (['build-packages'], 'config_file', './config.yaml'),
+        (['build-packages'], 'verbose', False),
+        (['build-packages'], 'work_dir', 'workspace'),
+        (['build-packages'], 'keep_build_dir', False),
+        (['build-packages'], 'packages', None),
+        (['build-packages'], 'result_dir', 'result'),
+        (['build-packages'], 'packages_metadata_repo_url', None),
+        (['build-packages'], 'packages_metadata_repo_branch', None),
+        (['build-packages'], 'mock_args', ''),
+        (['build-release-notes'], 'push_repo_url', None),
+        (['build-release-notes'], 'push_repo_branch', 'master'),
+        (['build-release-notes'], 'updater_name', None),
+        (['build-release-notes'], 'updater_email', None),
+        (['build-iso'], 'packages_dir', 'result/packages/latest'),
+        (['build-iso'], 'mock_args', ''),
+        (['update-versions'], 'commit_updates', True),
+        (['update-versions'], 'push_updates', True),
     ])
-    def test_parse_arguments_list_WithoutArgument_ShouldUseDefaultValue(self, key, expected):
+    def test_parse_arguments_list_WithoutArgument_ShouldUseDefaultValue(self, arguments, key, expected):
         cfg = ConfigParser()
 
-        result_dict = cfg.parse_arguments_list([])
+        result_dict = cfg.parse_command_line_arguments(arguments)
         value = result_dict.get(key)
 
         eq_(value, expected)

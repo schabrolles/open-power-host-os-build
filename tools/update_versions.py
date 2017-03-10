@@ -18,24 +18,22 @@ import copy
 import logging
 import os
 import re
-import sys
 
-import git
-
-from lib import config
 from lib import distro_utils
 from lib import exception
 from lib import packages_manager
-from lib import repository
 from lib import rpm_package
+from lib.utils import replace_str_in_file
+from lib.packages_manager import discover_packages
 from lib.versions_repository import setup_versions_repository
-
+from lib.versions_repository import update_versions_in_readme
+from lib.metapackage import update_metapackage
 
 LOG = logging.getLogger(__name__)
 PACKAGES = [
     'SLOF',
     'ginger',
-    'gingerbase',
+    'ginger-base',
     'kernel',
     'kimchi',
     'libservicelog',
@@ -53,25 +51,19 @@ PACKAGES = [
 PRERELEASE_TERMS = ['rc']
 
 
-def _sed_yaml_descriptor(yamlfile, old_commit, new_commit):
-    lines = []
-    with file(yamlfile, "r") as f:
-        lines = f.readlines()
-    with file(yamlfile, "w") as f:
-        for line in lines:
-            line = line.replace(old_commit, new_commit)
-            f.write(line)
-
-
 def _get_git_log(repo, since_id):
+    """
+    Get log of commit SHA1 and short messages since the ID provided
+    (non-inclusive).
+    """
     log = []
     for commit in repo.iter_commits():
+        if commit.hexsha.startswith(since_id):
+            break
         commit_message = commit.message.split('\n')[0]
         commit_message = commit_message.replace("'", "")
         commit_message = commit_message.replace("\"", "")
         log.append("%s %s" % (commit.hexsha, commit_message))
-        if commit.hexsha.startswith(since_id):
-            break
 
     return log
 
@@ -85,46 +77,57 @@ class Version(object):
         LOG.info("%s: Current version: %s" % (self.pkg, self.pkg.version))
 
     def update(self, user_name, user_email):
-        changelog = None
-
-        pkg = copy.copy(self.pkg)
-        pkg.commit_id = None
+        pkg = copy.deepcopy(self.pkg)
+        pkg.sources[0]["git"]["commit_id"] = None
         pkg.download_files(recurse=False)
-        pkg.commit_id = pkg.repository.head.commit.hexsha
+        newest_commit_id = pkg.sources[0]["git"]["repo"].head.commit.hexsha
 
-        if pkg.commit_id == self.pkg.commit_id:
+        if newest_commit_id == self.pkg.sources[0]["git"]["commit_id"]:
             LOG.debug("%s: no changes.", self.pkg)
             return
 
-        self._read_version_from_repo(pkg.repository.working_tree_dir)
+        pkg.sources[0]["git"]["commit_id"] = newest_commit_id
 
+        self._read_version_from_repo(
+            pkg.sources[0]["git"]["repo"].working_tree_dir)
+
+        change_log_header = None
         result = rpm_package.compare_versions(
             self.pkg.version, self._repo_version)
         if result < 0:
             pkg.spec_file.update_version(self._repo_version)
-            changelog = "Version update"
+            change_log_header = "Version update"
         elif result > 0:
             raise exception.PackageError(
                 "Current version (%s) is greater than repo version (%s)" %
                 (self.pkg.version, self._repo_version))
 
         pkg.spec_file.update_prerelease_tag(self._repo_prerelease)
-        self._bump_release(pkg, changelog, user_name, user_email)
+        self._bump_release(pkg, change_log_header, user_name, user_email)
 
-    def _bump_release(self, pkg, log=None, user_name=None, user_email=None):
+    def _bump_release(self, pkg, change_log_header=None, user_name=None,
+                      user_email=None):
         LOG.info("%s: Bumping release" % self.pkg)
+        change_log_lines = []
+        if change_log_header is not None:
+            change_log_lines.append(change_log_header)
 
-        if self.pkg.commit_id:
+        old_commit_id = self.pkg.sources[0]["git"]["commit_id"]
+        if old_commit_id:
+            new_source = pkg.sources[0]["git"]
+            new_commit_id = new_source["commit_id"]
             LOG.info("Updating package %s from %s to %s" % (
-                self.pkg.name, self.pkg.commit_id, pkg.commit_id))
-            log = _get_git_log(pkg.repository, self.pkg.commit_id)
-            _sed_yaml_descriptor(self.pkg.package_file, self.pkg.commit_id,
-                                 pkg.commit_id)
+                self.pkg.name, old_commit_id, new_commit_id))
+            change_log_lines += _get_git_log(
+                new_source["repo"], old_commit_id)
+            replace_str_in_file(
+                self.pkg.package_file, old_commit_id, new_commit_id)
+            pkg.spec_file.update_commit_id(old_commit_id, new_commit_id)
 
-        if log:
+        if change_log_lines:
             assert user_name is not None
             assert user_email is not None
-            pkg.spec_file.bump_release(log, user_name, user_email)
+            pkg.spec_file.bump_release(change_log_lines, user_name, user_email)
 
     def _read_version_from_repo(self, repo_path):
 
@@ -169,55 +172,27 @@ class Version(object):
             raise exception.PackageError(msg)
 
 
-def push_new_versions(versions_repo, release_date, versions_repo_push_url,
-        versions_repo_push_branch, committer_name, committer_email):
-    """
-    Push updated versions to the remote Git repository, using the
-    system's configured git committer and SSH credentials.
-    """
-    LOG.info("Pushing packages versions updates on release dated {date}"
-             .format(date=release_date))
-
-    LOG.info("Creating remote for URL {}".format(versions_repo_push_url))
-    VERSIONS_REPO_REMOTE = "push-remote"
-    versions_repo.create_remote(VERSIONS_REPO_REMOTE, versions_repo_push_url)
-
-    LOG.info("Adding files to repository index")
-    versions_repo.index.add(["*"])
-
-    LOG.info("Committing changes to local repository")
-    commit_message = "Weekly build {date}".format(date=release_date)
-    actor = git.Actor(committer_name, committer_email)
-    versions_repo.index.commit(commit_message, author=actor, committer=actor)
-
-    LOG.info("Pushing changes to remote repository")
-    remote = versions_repo.remote(VERSIONS_REPO_REMOTE)
-    refspec = "HEAD:refs/heads/{}".format(versions_repo_push_branch)
-    push_info = remote.push(refspec=refspec)[0]
-    LOG.debug("Push result: {}".format(push_info.summary))
-    if git.PushInfo.ERROR & push_info.flags:
-        raise repository.PushError(push_info)
-
-
-def main(args):
-    CONF = config.setup_default_config()
+def run(CONF):
     versions_repo = setup_versions_repository(CONF)
-    packages_to_update = CONF.get('default').get('packages') or PACKAGES
+    packages_to_update = CONF.get('update_versions').get('packages') or PACKAGES
     distro = distro_utils.get_distro(
-        CONF.get('default').get('distro_name'),
-        CONF.get('default').get('distro_version'),
-        CONF.get('default').get('arch_and_endianness'))
-    push_repo_url = CONF.get('default').get('push_repo_url')
-    push_repo_branch = CONF.get('default').get('push_repo_branch')
-    committer_name = CONF.get('default').get('committer_name')
-    committer_email = CONF.get('default').get('committer_email')
+        CONF.get('common').get('distro_name'),
+        CONF.get('common').get('distro_version'),
+        CONF.get('common').get('arch_and_endianness'))
+    commit_updates = CONF.get('common').get('commit_updates')
+    push_updates = CONF.get('common').get('push_updates')
+    push_repo_url = CONF.get('update_versions').get('push_repo_url')
+    push_repo_branch = CONF.get('update_versions').get('push_repo_branch')
+    updater_name = CONF.get('common').get('updater_name')
+    updater_email = CONF.get('common').get('updater_email')
 
-    REQUIRED_PARAMETERS = ["push_repo_url", "push_repo_branch",
-                           "committer_name", "committer_email"]
-    for parameter in REQUIRED_PARAMETERS:
-        if CONF.get('default').get(parameter) is None:
-            LOG.error("Parameter '%s' is required", parameter)
-            return 1
+    REQUIRED_PARAMETERS = [("common", "updater_name"), ("common", "updater_email")]
+    if push_updates:
+        REQUIRED_PARAMETERS += [("update_versions", "push_repo_url"),
+                                ("update_versions", "push_repo_branch")]
+    for section, parameter in REQUIRED_PARAMETERS:
+        if CONF.get(section).get(parameter) is None:
+            raise exception.RequiredParameterMissing(parameter=parameter)
 
     LOG.info("Checking for updates in packages versions: %s",
              ", ".join(packages_to_update))
@@ -226,17 +201,25 @@ def main(args):
                         download_source_code=False, distro=distro)
 
     for pkg in pm.packages:
-        try:
-            pkg_version = Version(pkg)
-            pkg_version.update(committer_name, committer_email)
-        except exception.PackageError as e:
-            LOG.exception("Failed to update versions")
-            return e.errno
+        pkg.lock()
+        pkg_version = Version(pkg)
+        pkg_version.update(updater_name, updater_email)
+        pkg.unlock()
+
+    packages_names = discover_packages()
+    METAPACKAGE_NAME = "open-power-host-os"
+    packages_names.remove(METAPACKAGE_NAME)
+
+    update_metapackage(
+        versions_repo, distro, METAPACKAGE_NAME, packages_names,
+        updater_name, updater_email)
+    update_versions_in_readme(versions_repo, distro, packages_names)
 
     release_date = datetime.today().date().isoformat()
-    push_new_versions(versions_repo, release_date, push_repo_url,
-                      push_repo_branch, committer_name, committer_email)
-
-
-if __name__ == '__main__':
-    sys.exit(main(sys.argv[1:]))
+    if commit_updates:
+        commit_message = "Weekly build {date}".format(date=release_date)
+        versions_repo.commit_changes(
+            commit_message, updater_name, updater_email)
+        if push_updates:
+            LOG.info("Pushing packages versions updates")
+            versions_repo.push_head_commits(push_repo_url, push_repo_branch)

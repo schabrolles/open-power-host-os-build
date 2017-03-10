@@ -12,44 +12,26 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-import logging
-import os
-import sys
 
-from lib import config
+import logging
+
 from lib import distro_utils
-from lib import exception
 from lib import build_manager
+from lib import packages_manager
 from lib.versions_repository import setup_versions_repository
 
 LOG = logging.getLogger(__name__)
 
 
-def main(args):
-    CONF = config.setup_default_config()
+def run(CONF):
     setup_versions_repository(CONF)
-    packages_to_build = (CONF.get('default').get('packages')
-                         or config.discover_packages())
+    packages_to_build = (CONF.get('build_packages').get('packages') or
+                         packages_manager.discover_packages())
     distro = distro_utils.get_distro(
-        CONF.get('default').get('distro_name'),
-        CONF.get('default').get('distro_version'),
-        CONF.get('default').get('arch_and_endianness'))
+        CONF.get('common').get('distro_name'),
+        CONF.get('common').get('distro_version'),
+        CONF.get('common').get('arch_and_endianness'))
 
     LOG.info("Building packages: %s", ", ".join(packages_to_build))
     bm = build_manager.BuildManager(packages_to_build, distro)
-    try:
-        bm()
-    except exception.BaseException as exc:
-        LOG.exception("Failed to build packages")
-        return exc.errno
-    else:
-        return 0
-
-
-if __name__ == '__main__':
-    if os.getuid() is 0:
-        print("Please, do not run this script as root, run "
-              "setup_environment.py script in order to properly setup user and"
-              " directory for build scripts")
-        sys.exit(3)
-    sys.exit(main(sys.argv[1:]))
+    bm.build()

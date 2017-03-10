@@ -11,20 +11,11 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.ofrom lib import utils
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import sys
-import os
+from lib import iso_builder
 
-from tools import setup_environment
 
-ROOT = 0
-if __name__ == '__main__':
-    if os.getuid() is not ROOT:
-        print("You should run this script with root privileges.")
-        sys.exit(1)
-    if len(sys.argv) != 2:
-        print("Usage: setup_environment.py YOUR_USER_LOGIN")
-        sys.exit(1)
-
-    sys.exit(setup_environment.main(sys.argv[1]))
+def run(CONF):
+    builder = iso_builder.MockPungiIsoBuilder(CONF)
+    builder.build()
