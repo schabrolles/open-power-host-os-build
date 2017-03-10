@@ -6,7 +6,8 @@ make_rpm:
   stage: build
   only:
     #- tags
-    - build*
+    - build
+    - build-1.5
   tags:
     - ppc64le
     - docker
