@@ -1,0 +1,19 @@
+stages:
+  - build
+
+make_rpm:
+  image: ppc64le/centos
+  stage: build
+  only:
+    #- tags
+    - build*
+  tags:
+    - ppc64le
+    - docker
+  before_script:
+    - yum install -y epel-release
+    - yum install -y $(cat rpm_requirements.txt)
+    - useradd joe
+    - usermod -a -G mock joe
+  script:
+    - su joe -c "./host_os.py --verbose build-packages"
