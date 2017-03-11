@@ -18,4 +18,4 @@ make_rpm:
     - usermod -a -G mock joe
     - python setup_environment.py joe
   script:
-    - su joe -c "./host_os.py --verbose"
+    - su joe -c "python host-os-build.py --package libvirt"
