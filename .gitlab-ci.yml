@@ -12,13 +12,10 @@ make_rpm:
     - docker
     - priviledged
   before_script:
-    - echo "$PWD"
-    - GOTO=$PWD
     - yum install -y epel-release
     - yum install -y bzip2 git GitPython mock PyYAML svn wget
     - python setup_environment.py joe
-      #- useradd joe
-      #- usermod -a -G mock joe
+    - chown -R joe /builds
   script:
     #- su - joe -c "python host-os-build.py --package libvirt"
     - runuser -u joe "cd $GOTO ; python host-os-build.py --package libvirt"
