@@ -6,15 +6,16 @@ make_rpm:
   stage: build
   only:
     #- tags
-    - build
     - build-1.5
   tags:
     - ppc64le
     - docker
+    - priviledged
   before_script:
     - yum install -y epel-release
-    - yum install -y $(cat requirements-dev.txt)
+    - yum install -y bzip2 git GitPython mock PyYAML svn wget
     - useradd joe
     - usermod -a -G mock joe
+    - python setup_environment.py joe
   script:
-    - su joe -c "./host_os.py --verbose build-packages"
+    - su joe -c "./host_os.py --verbose"
