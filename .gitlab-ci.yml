@@ -15,10 +15,10 @@ make_rpm:
     - yum install -y $(cat rpm_requirements.txt)
     - useradd joe
     - usermod -a -G mock joe
-    - sed -i 's|http://mirror.centos.org/altarch/|http://vault.centos.org/altarch/7.2.1511/|' mock_configs/CentOS/7/CentOS-7-ppc64le.cfg
-    - sed -i "s|distro_version:.*|distro_version: \"7.2\"|" config.yaml
-    - sed -i -E "s|  '7': (\"\./mock_configs.*)|  '7.2': \1|" config.yaml
-    - sed -i "s|build_version:.*|build_version: \"v1.5.0\"|" config.yaml
+      #- sed -i 's|http://mirror.centos.org/altarch/|http://vault.centos.org/altarch/7.2.1511/|' mock_configs/CentOS/7/CentOS-7-ppc64le.cfg
+      #- sed -i "s|distro_version:.*|distro_version: \"7.2\"|" config.yaml
+      #- sed -i -E "s|  '7': (\"\./mock_configs.*)|  '7.2': \1|" config.yaml
+      #- sed -i "s|build_version:.*|build_version: \"v1.5.0\"|" config.yaml
     - yum install -y bzip2 wget
     - mock --scrub all
   script:
