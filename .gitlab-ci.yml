@@ -15,8 +15,8 @@ make_rpm:
     - yum install -y epel-release
     - yum install -y bzip2 git GitPython mock PyYAML svn wget
     - python setup_environment.py joe
-    - useradd joe
-    - usermod -a -G mock joe
+      #- useradd joe
+      #- usermod -a -G mock joe
   script:
     #- su - joe -c "python host-os-build.py --package libvirt"
     - runsuser -l -u joe python host-os-build.py --package libvirt
