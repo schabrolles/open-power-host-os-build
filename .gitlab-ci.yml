@@ -19,4 +19,4 @@ make_rpm:
     - BUILD_DIR=$PWD
   script:
     #- su - bob -c "python host-os-build.py --package libvirt"
-    - runuser -l bob -c "python $BUILD_DIR/host-os-build.py --package libvirt"
+    - runuser -l bob -c "python $BUILD_DIR/host-os-build.py --verbose"
