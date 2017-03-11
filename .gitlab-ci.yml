@@ -13,13 +13,10 @@ make_rpm:
     - priviledged
   before_script:
     - yum install -y epel-release
-    - yum install -y python which bzip2 git GitPython mock PyYAML svn wget
+    - yum install -y bzip2 git GitPython mock PyYAML svn wget
     - python setup_environment.py bob
     - chown -R bob /builds
     - BUILD_DIR=$PWD
-    - which python
   script:
     #- su - bob -c "python host-os-build.py --package libvirt"
-    - runuser -l bob -c "/usr/bin/python --version"
-    - runuser -l bob -c "ls -l $BUILD_DIR/host-os-build.py"
-    - runuser -l bob -c "/usr/bin/python $BUILD_DIR/host-os-build.py --package libvirt"
+    - runuser -l bob -c "python $BUILD_DIR/host-os-build.py --package libvirt"
