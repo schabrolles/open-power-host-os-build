@@ -16,6 +16,7 @@ make_rpm:
     - yum install -y bzip2 git GitPython mock PyYAML svn wget
     - python setup_environment.py joe
     - chown -R joe /builds
+    - BUILD_DIR=$PWD
   script:
     #- su - joe -c "python host-os-build.py --package libvirt"
-    - runuser -u joe "cd $GOTO ; python host-os-build.py --package libvirt"
+    - runuser -u joe "cd $BUILD_DIR ; python host-os-build.py --package libvirt"
