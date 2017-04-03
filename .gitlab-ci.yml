@@ -1,0 +1,25 @@
+stages:
+  - build
+
+make_rpm:
+  image: ppc64le/centos
+  stage: build
+  only:
+    #- tags
+    - build
+  tags:
+    - ppc64le
+    - docker
+  before_script:
+    - yum install -y epel-release
+    - yum install -y $(cat rpm_requirements.txt)
+    - useradd bob
+    - usermod -a -G mock bob
+      #- sed -i 's|http://mirror.centos.org/altarch/|http://vault.centos.org/altarch/7.2.1511/|' mock_configs/CentOS/7/CentOS-7-ppc64le.cfg
+      #- sed -i "s|distro_version:.*|distro_version: \"7.2\"|" config.yaml
+      #- sed -i -E "s|  '7': (\"\./mock_configs.*)|  '7.2': \1|" config.yaml
+      #- sed -i "s|build_version:.*|build_version: \"v1.5.0\"|" config.yaml
+    - yum install -y bzip2 wget
+    - mock --scrub all
+  script:
+    - su bob -c "./host_os.py --verbose build-packages"
