@@ -4,7 +4,7 @@ common:
  verbose: False
  log_size: 2097152
  packages_metadata_repo_url: "https://github.com/schabrolles/versions.git"
- packages_metadata_repo_branch: 'hostos-stable'
+ packages_metadata_repo_branch: 'SebOS-stable'
  http_proxy: ''
  distro_name: 'CentOS'
  distro_version: '7'
